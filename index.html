@@ -1,0 +1,62 @@
+<!doctype html>
+
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebGPU Life</title>
+</head>
+<body>
+<canvas width="512" height="512"></canvas>
+<script type="module">
+    // Your WebGPU code will begin here!
+    
+    // check if webgpu is supported
+    if(!navigator.gpu){
+        throw new Error("WebGPU not supported on this browser!")
+    }
+    //  check if gpu is available
+    const adapter = await navigator.gpu.requestAdapter()
+    if(!adapter){
+        throw new Error("No appropriate GPU found.")
+    }
+    // request a gpu
+    const device = await adapter.requestDevice();
+
+    // get canvas element and get webgpu context
+    const canvas = document.querySelector("canvas");
+    const context = canvas.getContext("webgpu");
+    // returns optimal texture format
+    const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+    // context returned by canvas must be configured
+    context.configure({device, format: canvasFormat});
+    
+    // encoder is an interface that records gpu commands
+    const encoder = device.createCommandEncoder();
+    // all render passes start with a `beginRenderPass()` call
+    // defines the textures that receive output of a command
+    const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+            // defining "where" (which view) the rendered output must go to
+            view: context.getCurrentTexture().createView(),
+            // what to do when render pass starts
+            loadOp: "clear",
+            // set clear value
+            clearValue: [0, 0, 0.4, 0.1],
+            // what to do when render pass ends
+            storeOp: "store"
+        }]
+    })
+    pass.end()
+    
+    // till not we are only recording, no gpu action has begun
+    
+    // // create a command buffer
+    // const commandBuffer = encoder.finish();
+    // // submit the command buffer to the gpu device's queue
+    // device.queue.submit([commandBuffer]);
+    // // commandBuffer is now useless, so instead, this is often done:
+    device.queue.submit([encoder.finish()])
+    
+</script>
+</body>
+</html>
