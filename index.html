@@ -10,6 +10,8 @@
 <script type="module">
     // Your WebGPU code will begin here!
 
+    const GRID_SIZE = 32;
+
     // check if webgpu is supported
     if (!navigator.gpu) {
         throw new Error("WebGPU not supported on this browser!")
@@ -32,7 +34,7 @@
 
     // encoder is an interface that records gpu commands
     const encoder = device.createCommandEncoder();
-    
+
     const vertices = new Float32Array([
 //   X,    Y,
         -0.8, -0.8, // Triangle 1 (Blue)
@@ -43,6 +45,15 @@
         0.8, 0.8,
         -0.8, 0.8,
     ]);
+
+    // create a uniform buffer for the grid
+    const uniformArray = new Float32Array([GRID_SIZE, GRID_SIZE]);
+    const uniformBuffer = device.createBuffer({
+        label: "Grid Uniforms",
+        size: uniformArray.byteLength,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    device.queue.writeBuffer(uniformBuffer, 0, uniformArray);
 
     // create a gpu buffer for the vertices
     const vertexBuffer = device.createBuffer({
@@ -89,10 +100,18 @@
         // and passes them to the rasterizer, which is responsible for finding the pixels within
         // the transformed triangle in the clip space. However, the pixels have not yet been colored.
         
+        // declaring grid uniform
+        @group(0) @binding(0) var<uniform> grid: vec2f;
+        
         @vertex
-        fn vertexMain(@location(0) vtxPos: vec2f) ->
+        fn vertexMain(@location(0) vtxPos: vec2f, @builtin(instance_index) instance : u32) ->
         @builtin(position) vec4f {
-            return vec4f(vtxPos, 0, 1);
+            let i = f32(instance);
+            let cell = vec2f(floor(i / grid.x), i % grid.y);
+            let cellOffset = (cell / grid) * 2;
+            let gridPos = ((vtxPos + 1) / grid) - 1 + cellOffset;
+            
+            return vec4f(gridPos, 0, 1);
         }
         
         // The fragment shader is responsible for coloring each pixel that the rasterizer picks.
@@ -130,6 +149,19 @@
         }
     });
 
+    // to bind the uniform buffer to the shader
+    const bindGroup = device.createBindGroup({
+        label: "Cell renderer bind group",
+        // '0' corresponds to the @group(0) in the shader
+        layout: cellPipeline.getBindGroupLayout(0),
+        entries: [{
+            // '0' corresponds to the @binding(0) in the shader
+            binding: 0,
+            // where the actual resource (buffer) is located
+            resource: {buffer: uniformBuffer}
+        }]
+    })
+
     // All render passes start with a `beginRenderPass()` call.
     // It defines the textures that receive output of a command.
     // begin recording commands
@@ -150,8 +182,12 @@
     pass.setPipeline(cellPipeline)
     // set the buffer that contains the vertices
     pass.setVertexBuffer(0, vertexBuffer)       // 0 for the index of the element in vertexBuffer
+    
+    // bind grid size uniform
+    pass.setBindGroup(0, bindGroup);
+    
     // draw triangle for n vertices
-    pass.draw(vertices.length / 2)
+    pass.draw(vertices.length / 2, GRID_SIZE * GRID_SIZE)
 
     // stop recording commands
     pass.end()
