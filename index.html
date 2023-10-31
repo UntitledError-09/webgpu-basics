@@ -9,14 +9,14 @@
 <canvas width="512" height="512"></canvas>
 <script type="module">
     // Your WebGPU code will begin here!
-    
+
     // check if webgpu is supported
-    if(!navigator.gpu){
+    if (!navigator.gpu) {
         throw new Error("WebGPU not supported on this browser!")
     }
     //  check if gpu is available
     const adapter = await navigator.gpu.requestAdapter()
-    if(!adapter){
+    if (!adapter) {
         throw new Error("No appropriate GPU found.")
     }
     // request a gpu
@@ -29,11 +29,110 @@
     const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
     // context returned by canvas must be configured
     context.configure({device, format: canvasFormat});
-    
+
     // encoder is an interface that records gpu commands
     const encoder = device.createCommandEncoder();
-    // all render passes start with a `beginRenderPass()` call
-    // defines the textures that receive output of a command
+    
+    const vertices = new Float32Array([
+//   X,    Y,
+        -0.8, -0.8, // Triangle 1 (Blue)
+        0.8, -0.8,
+        0.8, 0.8,
+
+        -0.8, -0.8, // Triangle 2 (Red)
+        0.8, 0.8,
+        -0.8, 0.8,
+    ]);
+
+    // create a gpu buffer for the vertices
+    const vertexBuffer = device.createBuffer({
+        // optional label for each buffer
+        label: "Cell vertices",
+        // bytes of memory to be allocated
+        size: vertices.byteLength,
+        // bitwise flags to be passed for usage of buffer
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+    });
+    // copy data into device buffer memory
+    device.queue.writeBuffer(vertexBuffer, 0, vertices);
+
+    // define the vertex layout
+    const vertexBufferLayout = {
+        // bytes in an element (float32x2 => 32*2 = 8 * (4 * 2) )
+        arrayStride: 4 * 2,
+        // info regarding each element (here, a vertex)
+        attributes: [{
+            // for available formats check GPUVertexFormat
+            format: "float32x2",
+            // bytes to skip in the element to get to the attribute
+            offset: 0,
+            // pointer to location of variable in shader (between 0 and 15)
+            shaderLocation: 0
+        }]
+    }
+
+    // shaders
+    const cellShaderModule = device.createShaderModule({
+        label: "Cell Shader",
+        code: `
+        // shader code
+        
+        // WSGL runs shader functions in parallel, meaning vertices are processed non-sequentially.
+        // Each vertex shader functions receives a single vertex (from the buffer) as an argument,
+        // and produces the output for a single vertex.
+        
+        // The type of a function (declared by 'fn') is defined by the attribute before it.
+        // for vertex shader, it is '@vertex', and this function MUST return the position of the
+        // transformed vertex by setting the built-in attribute 'position' to the final value.
+        
+        // The vertex shader is responsible for transforming the world coordinates to clip space,
+        // and passes them to the rasterizer, which is responsible for finding the pixels within
+        // the transformed triangle in the clip space. However, the pixels have not yet been colored.
+        
+        @vertex
+        fn vertexMain(@location(0) vtxPos: vec2f) ->
+        @builtin(position) vec4f {
+            return vec4f(vtxPos, 0, 1);
+        }
+        
+        // The fragment shader is responsible for coloring each pixel that the rasterizer picks.
+        // The fragment shader returns the color the pixel should be colored
+        
+        @fragment
+        fn fragmentMain() -> @location(0) vec4f {
+            return vec4f(1, 0, 0, 1);
+        }
+        `
+    })
+
+    // render pipeline
+    const cellPipeline = device.createRenderPipeline({
+        label: "Cell pipeline",
+        // what types of input the pipeline needs
+        layout: "auto",
+        // vertex stage definition
+        vertex: {
+            // where shader code is defined
+            module: cellShaderModule,
+            // name of function that should be run first
+            entryPoint: "vertexMain",
+            // how data is packed into your buffers
+            buffers: [vertexBufferLayout]
+        },
+        fragment: {
+            module: cellShaderModule,
+            entryPoint: "fragmentMain",
+            // details of the output format
+            targets: [{
+                // must match textures given in colorAttachments
+                format: canvasFormat
+            }]
+        }
+    });
+
+    // All render passes start with a `beginRenderPass()` call.
+    // It defines the textures that receive output of a command.
+    // begin recording commands
     const pass = encoder.beginRenderPass({
         colorAttachments: [{
             // defining "where" (which view) the rendered output must go to
@@ -46,17 +145,25 @@
             storeOp: "store"
         }]
     })
+
+    // set which pipeline should be used
+    pass.setPipeline(cellPipeline)
+    // set the buffer that contains the vertices
+    pass.setVertexBuffer(0, vertexBuffer)       // 0 for the index of the element in vertexBuffer
+    // draw triangle for n vertices
+    pass.draw(vertices.length / 2)
+
+    // stop recording commands
     pass.end()
-    
-    // till not we are only recording, no gpu action has begun
-    
+
     // // create a command buffer
     // const commandBuffer = encoder.finish();
     // // submit the command buffer to the gpu device's queue
     // device.queue.submit([commandBuffer]);
+
     // // commandBuffer is now useless, so instead, this is often done:
     device.queue.submit([encoder.finish()])
-    
+
 </script>
 </body>
 </html>
