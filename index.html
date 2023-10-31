@@ -92,6 +92,25 @@
         // Each vertex shader functions receives a single vertex (from the buffer) as an argument,
         // and produces the output for a single vertex.
         
+        // using structs to pass data from vertex shader to fragment shader
+        struct VtxIn{
+            @location(0) vtxPos: vec2f,
+            @builtin(instance_index) instance: u32
+        };
+        
+        struct VtxOut{
+            @builtin(position) vtxPos: vec4f,
+            @location(0) cell: vec2f
+        };
+        
+        // an alternate method when shader and fragment code is not in the same place
+        struct FragIn{
+            @location(0) cell: vec2f
+        };
+        
+        // declaring grid uniform
+        @group(0) @binding(0) var<uniform> grid: vec2f;
+        
         // The type of a function (declared by 'fn') is defined by the attribute before it.
         // for vertex shader, it is '@vertex', and this function MUST return the position of the
         // transformed vertex by setting the built-in attribute 'position' to the final value.
@@ -100,26 +119,27 @@
         // and passes them to the rasterizer, which is responsible for finding the pixels within
         // the transformed triangle in the clip space. However, the pixels have not yet been colored.
         
-        // declaring grid uniform
-        @group(0) @binding(0) var<uniform> grid: vec2f;
-        
         @vertex
-        fn vertexMain(@location(0) vtxPos: vec2f, @builtin(instance_index) instance : u32) ->
-        @builtin(position) vec4f {
-            let i = f32(instance);
+        fn vertexMain(vtxData: VtxIn) ->
+        VtxOut {
+            let i = f32(vtxData.instance);
             let cell = vec2f(floor(i / grid.x), i % grid.y);
             let cellOffset = (cell / grid) * 2;
-            let gridPos = ((vtxPos + 1) / grid) - 1 + cellOffset;
+            let gridPos = ((vtxData.vtxPos + 1) / grid) - 1 + cellOffset;
             
-            return vec4f(gridPos, 0, 1);
+            var output: VtxOut;
+            output.vtxPos = vec4f(gridPos, 0, 1);
+            output.cell = cell;
+            return output;
         }
         
         // The fragment shader is responsible for coloring each pixel that the rasterizer picks.
         // The fragment shader returns the color the pixel should be colored
         
         @fragment
-        fn fragmentMain() -> @location(0) vec4f {
-            return vec4f(1, 0, 0, 1);
+        fn fragmentMain(vtxData: VtxOut) -> @location(0) vec4f {
+            var c = vtxData.cell / grid;
+            return vec4f(c, 1-c.x, 1);
         }
         `
     })
