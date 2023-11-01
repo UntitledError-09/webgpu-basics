@@ -11,6 +11,56 @@
     // Your WebGPU code will begin here!
 
     const GRID_SIZE = 32;
+    const UPDATE_INTERVAL = 200;
+    let step = 0;
+
+    function updateGrid() {
+        step++;
+
+        // encoder is an interface that records gpu commands
+        // needs to be re-initialed each frame
+        const encoder = device.createCommandEncoder();
+
+        // All render passes start with a `beginRenderPass()` call.
+        // It defines the textures that receive output of a command.
+        // begin recording commands
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                // defining "where" (which view) the rendered output must go to
+                view: context.getCurrentTexture().createView(),
+                // what to do when render pass starts
+                loadOp: "clear",
+                // set clear value
+                clearValue: [0, 0, 0.4, 1.0],
+                // what to do when render pass ends
+                storeOp: "store"
+            }]
+        })
+
+        // set which pipeline should be used
+        pass.setPipeline(cellPipeline)
+
+        // bind grid size uniform
+        pass.setBindGroup(0, bindGroups[step & 1]);
+        console.log(step)
+
+        // set the buffer that contains the vertices
+        pass.setVertexBuffer(0, vertexBuffer)       // 0 for the index of the element in vertexBuffer
+
+        // draw triangle for n vertices
+        pass.draw(vertices.length / 2, GRID_SIZE * GRID_SIZE)
+
+        // stop recording commands
+        pass.end()
+
+        // // create a command buffer
+        // const commandBuffer = encoder.finish();
+        // // submit the command buffer to the gpu device's queue
+        // device.queue.submit([commandBuffer]);
+
+        // // commandBuffer is now useless, so instead, this is often done:
+        device.queue.submit([encoder.finish()])
+    }
 
     // check if webgpu is supported
     if (!navigator.gpu) {
@@ -24,6 +74,18 @@
     // request a gpu
     const device = await adapter.requestDevice();
 
+    // Error logging (check https://toji.dev/webgpu-best-practices/error-handling)
+    // This example is pulled directly from the spec.
+    device.pushErrorScope('validation');
+
+    device.popErrorScope().then((error) => {
+        if (error) {
+            // There was an error creating the sampler, so discard it.
+            sampler = null;
+            console.error(`An error occured while creating sampler: ${error.message}`);
+        }
+    });
+
     // get canvas element and get webgpu context
     const canvas = document.querySelector("canvas");
     const context = canvas.getContext("webgpu");
@@ -31,9 +93,6 @@
     const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
     // context returned by canvas must be configured
     context.configure({device, format: canvasFormat});
-
-    // encoder is an interface that records gpu commands
-    const encoder = device.createCommandEncoder();
 
     const vertices = new Float32Array([
 //   X,    Y,
@@ -45,15 +104,6 @@
         0.8, 0.8,
         -0.8, 0.8,
     ]);
-
-    // create a uniform buffer for the grid
-    const uniformArray = new Float32Array([GRID_SIZE, GRID_SIZE]);
-    const uniformBuffer = device.createBuffer({
-        label: "Grid Uniforms",
-        size: uniformArray.byteLength,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    device.queue.writeBuffer(uniformBuffer, 0, uniformArray);
 
     // create a gpu buffer for the vertices
     const vertexBuffer = device.createBuffer({
@@ -67,19 +117,53 @@
     // copy data into device buffer memory
     device.queue.writeBuffer(vertexBuffer, 0, vertices);
 
+    // create a uniform buffer for the grid
+    const uniformArray = new Float32Array([GRID_SIZE, GRID_SIZE]);
+    const uniformBuffer = device.createBuffer({
+        label: "Grid Uniforms",
+        size: uniformArray.byteLength,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    device.queue.writeBuffer(uniformBuffer, 0, uniformArray);
+
+    // create a storage buffer to store dynamically sized arrays
+    const cellStateArray = new Uint32Array(GRID_SIZE * GRID_SIZE);
+    const cellStateBuffer = [
+        device.createBuffer({
+            label: "Cell State A Storage",
+            size: cellStateArray.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        }),
+        device.createBuffer({
+            label: "Cell State B Storage",
+            size: cellStateArray.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        })
+    ];
+    for (let i = 0; i < cellStateArray.length; i += 3) {
+        cellStateArray[i] = 1;
+    }
+    device.queue.writeBuffer(cellStateBuffer[0], 0, cellStateArray);
+    for (let i = 0; i < cellStateArray.length; i += 1) {
+        cellStateArray[i] = i % 2;
+    }
+    device.queue.writeBuffer(cellStateBuffer[1], 0, cellStateArray);
+
     // define the vertex layout
     const vertexBufferLayout = {
         // bytes in an element (float32x2 => 32*2 = 8 * (4 * 2) )
         arrayStride: 4 * 2,
         // info regarding each element (here, a vertex)
-        attributes: [{
-            // for available formats check GPUVertexFormat
-            format: "float32x2",
-            // bytes to skip in the element to get to the attribute
-            offset: 0,
-            // pointer to location of variable in shader (between 0 and 15)
-            shaderLocation: 0
-        }]
+        attributes: [
+            {
+                // for available formats check GPUVertexFormat
+                format: "float32x2",
+                // bytes to skip in the element to get to the attribute
+                offset: 0,
+                // pointer to location of variable in shader (between 0 and 15)
+                shaderLocation: 0
+            }
+        ]
     }
 
     // shaders
@@ -110,6 +194,7 @@
         
         // declaring grid uniform
         @group(0) @binding(0) var<uniform> grid: vec2f;
+        @group(0) @binding(1) var<storage> cellState: array<u32>;
         
         // The type of a function (declared by 'fn') is defined by the attribute before it.
         // for vertex shader, it is '@vertex', and this function MUST return the position of the
@@ -123,9 +208,11 @@
         fn vertexMain(vtxData: VtxIn) ->
         VtxOut {
             let i = f32(vtxData.instance);
-            let cell = vec2f(floor(i / grid.x), i % grid.y);
+            let cell = vec2f(i % grid.y, floor(i / grid.x));
+            let state = f32(cellState[vtxData.instance]);
+            
             let cellOffset = (cell / grid) * 2;
-            let gridPos = ((vtxData.vtxPos + 1) / grid) - 1 + cellOffset;
+            let gridPos = ((vtxData.vtxPos * state + 1) / grid) - 1 + cellOffset;
             
             var output: VtxOut;
             output.vtxPos = vec4f(gridPos, 0, 1);
@@ -170,56 +257,44 @@
     });
 
     // to bind the uniform buffer to the shader
-    const bindGroup = device.createBindGroup({
-        label: "Cell renderer bind group",
-        // '0' corresponds to the @group(0) in the shader
-        layout: cellPipeline.getBindGroupLayout(0),
-        entries: [{
-            // '0' corresponds to the @binding(0) in the shader
-            binding: 0,
-            // where the actual resource (buffer) is located
-            resource: {buffer: uniformBuffer}
-        }]
-    })
+    const bindGroups = [
+        device.createBindGroup({
+            label: "Cell renderer bind group A",
+            // '0' corresponds to the @group(0) in the shader
+            layout: cellPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    // '0' corresponds to the @binding(0) in the shader
+                    binding: 0,
+                    // where the actual resource (buffer) is located
+                    resource: {buffer: uniformBuffer}
+                },
+                {
+                    binding: 1,
+                    resource: {buffer: cellStateBuffer[0]}
+                }
+            ]
+        }),
+        device.createBindGroup({
+            label: "Cell renderer bind group B",
+            // '0' corresponds to the @group(0) in the shader
+            layout: cellPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    // '0' corresponds to the @binding(0) in the shader
+                    binding: 0,
+                    // where the actual resource (buffer) is located
+                    resource: {buffer: uniformBuffer}
+                },
+                {
+                    binding: 1,
+                    resource: {buffer: cellStateBuffer[1]}
+                }
+            ]
+        })
+    ]
 
-    // All render passes start with a `beginRenderPass()` call.
-    // It defines the textures that receive output of a command.
-    // begin recording commands
-    const pass = encoder.beginRenderPass({
-        colorAttachments: [{
-            // defining "where" (which view) the rendered output must go to
-            view: context.getCurrentTexture().createView(),
-            // what to do when render pass starts
-            loadOp: "clear",
-            // set clear value
-            clearValue: [0, 0, 0.4, 0.1],
-            // what to do when render pass ends
-            storeOp: "store"
-        }]
-    })
-
-    // set which pipeline should be used
-    pass.setPipeline(cellPipeline)
-    // set the buffer that contains the vertices
-    pass.setVertexBuffer(0, vertexBuffer)       // 0 for the index of the element in vertexBuffer
-    
-    // bind grid size uniform
-    pass.setBindGroup(0, bindGroup);
-    
-    // draw triangle for n vertices
-    pass.draw(vertices.length / 2, GRID_SIZE * GRID_SIZE)
-
-    // stop recording commands
-    pass.end()
-
-    // // create a command buffer
-    // const commandBuffer = encoder.finish();
-    // // submit the command buffer to the gpu device's queue
-    // device.queue.submit([commandBuffer]);
-
-    // // commandBuffer is now useless, so instead, this is often done:
-    device.queue.submit([encoder.finish()])
-
+    setInterval(updateGrid, UPDATE_INTERVAL);
 </script>
 </body>
 </html>
