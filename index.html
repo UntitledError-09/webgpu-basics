@@ -12,14 +12,32 @@
 
     const GRID_SIZE = 32;
     const UPDATE_INTERVAL = 200;
+    const WORKGROUP_SIZE = 8;
     let step = 0;
 
     function updateGrid() {
-        step++;
-
         // encoder is an interface that records gpu commands
         // needs to be re-initialed each frame
         const encoder = device.createCommandEncoder();
+
+        // compute pass runs before render pass so that the render pass can immediately
+        // use the latest results from the compute pass.
+        const computePass = encoder.beginComputePass();
+
+        computePass.setPipeline(simulationPipeline);
+        computePass.setBindGroup(0, bindGroups[step % 2]);
+        
+        // instead of drawing like in render pass, we dispatch the work to the compute
+        // shader while defining how many workgroups you want to execute on each axis.
+        // this number corresponds to the @workgroup_size in the shader code
+        const workgroupCount = Math.ceil(GRID_SIZE / WORKGROUP_SIZE);
+        computePass.dispatchWorkgroups(workgroupCount, workgroupCount);
+
+        computePass.end();
+
+        // step is incremented after compute pass so that the output buffer becomes
+        // the input buffer between compute and render passes.
+        step++;
 
         // All render passes start with a `beginRenderPass()` call.
         // It defines the textures that receive output of a command.
@@ -141,13 +159,9 @@
         })
     ];
     for (let i = 0; i < cellStateArray.length; i += 3) {
-        cellStateArray[i] = 1;
+        cellStateArray[i] = Math.random() <= 0.5 ? 0 : 1;
     }
     device.queue.writeBuffer(cellStateBuffer[0], 0, cellStateArray);
-    for (let i = 0; i < cellStateArray.length; i += 1) {
-        cellStateArray[i] = i % 2;
-    }
-    device.queue.writeBuffer(cellStateBuffer[1], 0, cellStateArray);
 
     // define the vertex layout
     const vertexBufferLayout = {
@@ -231,11 +245,142 @@
         `
     })
 
+    // compute shader
+    const computeShaderModule = device.createShaderModule({
+        label: "Game of Life Simulation c-shader",
+        code: `
+        @group(0) @binding(0) var<uniform> grid: vec2f;
+        
+        // compute shaders do not have any standard output, hence the output must be captured
+        // through in a texture or buffer. Ping-Pong method can be used in this case.
+        // var<storage> is a read-only bufer
+        @group(0) @binding(1) var<storage> cellStateIn: array<u32>;
+        // var<storage, read_write> allows both read and write
+        @group(0) @binding(2) var<storage, read_write> cellStateOut: array<u32>;
+        
+        // cell-mapping function to translate (x,y) into n;
+        fn cellIndex(cell: vec2u) -> u32 {
+            return (cell.y % u32(grid.y)) * u32(grid.x) + (cell.x % u32(grid.x));
+        }
+        
+        // get value in cell
+        fn cellActive(x: u32, y: u32) -> u32{
+            return cellStateIn[cellIndex(vec2(x, y))];
+        }
+        
+        @compute
+        @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
+        fn computeMain(@builtin(global_invocation_id) cell: vec3u){
+            // determine how many neighboring cells are active
+            let activeNeighbors = cellActive(cell.x+1, cell.y+1) +
+                                    cellActive(cell.x+1, cell.y) +
+                                    cellActive(cell.x+1, cell.y-1) +
+                                    cellActive(cell.x, cell.y-1) +
+                                    cellActive(cell.x-1, cell.y-1) +
+                                    cellActive(cell.x-1, cell.y) +
+                                    cellActive(cell.x-1, cell.y+1) +
+                                    cellActive(cell.x, cell.y+1);
+            
+            // // accessing x and y attributes using cell.xy is same as vec2(cell.x, cell.y), which is known as coordinate sizzling
+            // if(cellStateIn[cellIndex(cell.xy)] == 1){
+            //     cellStateOut[cellIndex(cell.xy)] = 0;
+            // } else {
+            //     cellStateOut[cellIndex(cell.xy)] = 1;
+            // }
+            let i = cellIndex(cell.xy);
+            switch activeNeighbors {
+                case 2: {   // cell with 2 neighbors exactly stay active
+                    cellStateOut[i] = cellStateIn[i];
+                }
+                case 3: {   // cell with 3 neighbors exactly become active
+                    cellStateOut[i] = 1;
+                }
+                default: {   // else, they become inactive
+                    cellStateOut[i] = 0;
+                }
+            }
+        }
+        `
+    })
+
+    // bind group layout must be manually defined (instead "auto") when multiple pipelines are being used
+    // and they share a bind group
+    const bindGroupLayout = device.createBindGroupLayout({
+        label: "Cell Bind Group Layout",
+        entries: [{
+            // the binding attribute corresponds to the @binding() value in the shader code
+            binding: 0,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
+            buffer: {}      // Grid uniform buffer
+        }, {
+            binding: 1,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
+            buffer: {type: "read-only-storage"}
+        }, {
+            binding: 2,
+            visibility: GPUShaderStage.COMPUTE,
+            buffer: {type: "storage"}
+        }]
+    })
+
+    // to bind the uniform buffer to the shader
+    const bindGroups = [
+        device.createBindGroup({
+            label: "Cell renderer bind group A",
+            // '0' corresponds to the @group(0) in the shader
+            layout: bindGroupLayout,
+            entries: [
+                {
+                    // '0' corresponds to the @binding(0) in the shader
+                    binding: 0,
+                    // where the actual resource (buffer) is located
+                    resource: {buffer: uniformBuffer}
+                },
+                {
+                    binding: 1,
+                    resource: {buffer: cellStateBuffer[0]}
+                },
+                {
+                    binding: 2,
+                    resource: {buffer: cellStateBuffer[1]}
+                }
+            ]
+        }),
+        device.createBindGroup({
+            label: "Cell renderer bind group B",
+            // '0' corresponds to the @group(0) in the shader
+            layout: bindGroupLayout,
+            entries: [
+                {
+                    // '0' corresponds to the @binding(0) in the shader
+                    binding: 0,
+                    // where the actual resource (buffer) is located
+                    resource: {buffer: uniformBuffer}
+                },
+                {
+                    binding: 1,
+                    resource: {buffer: cellStateBuffer[1]}
+                },
+                {
+                    binding: 2,
+                    resource: {buffer: cellStateBuffer[0]}
+                }
+            ]
+        })
+    ]
+
+    // defining the pipeline layout
+    const pipelineLayout = device.createPipelineLayout({
+        label: "Cell Pipeline Layout",
+        // the order of bind group layouts correspond to the @group() in the shader code
+        bindGroupLayouts: [bindGroupLayout]
+    });
+
     // render pipeline
     const cellPipeline = device.createRenderPipeline({
         label: "Cell pipeline",
         // what types of input the pipeline needs
-        layout: "auto",
+        layout: pipelineLayout,
         // vertex stage definition
         vertex: {
             // where shader code is defined
@@ -256,43 +401,15 @@
         }
     });
 
-    // to bind the uniform buffer to the shader
-    const bindGroups = [
-        device.createBindGroup({
-            label: "Cell renderer bind group A",
-            // '0' corresponds to the @group(0) in the shader
-            layout: cellPipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    // '0' corresponds to the @binding(0) in the shader
-                    binding: 0,
-                    // where the actual resource (buffer) is located
-                    resource: {buffer: uniformBuffer}
-                },
-                {
-                    binding: 1,
-                    resource: {buffer: cellStateBuffer[0]}
-                }
-            ]
-        }),
-        device.createBindGroup({
-            label: "Cell renderer bind group B",
-            // '0' corresponds to the @group(0) in the shader
-            layout: cellPipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    // '0' corresponds to the @binding(0) in the shader
-                    binding: 0,
-                    // where the actual resource (buffer) is located
-                    resource: {buffer: uniformBuffer}
-                },
-                {
-                    binding: 1,
-                    resource: {buffer: cellStateBuffer[1]}
-                }
-            ]
-        })
-    ]
+    // create the compute pipeline
+    const simulationPipeline = device.createComputePipeline({
+        label: "Simulation Pipeline",
+        layout: pipelineLayout,
+        compute: {
+            module: computeShaderModule,
+            entryPoint: "computeMain"
+        }
+    });
 
     setInterval(updateGrid, UPDATE_INTERVAL);
 </script>
